@@ -17,15 +17,20 @@ var (
 	EnumError = errors.New("invalid enum value")
 )
 
+type OpGen[T any]func() T
+
+
 type group[T any] struct {
 	toState map[string]State[T]
 	pre []Proc[T]
 	post []Proc[T]
+	OpGen[T]
 }
 
-func NewGroup[T any]() group[T] {
+func NewGroup[T any](og OpGen[T]) group[T] {
 	g := group[T]{}
 	g.toState = make(map[string]State[T])
+	g.OpGen = og
 	return g
 }
 
@@ -122,16 +127,52 @@ type Retry interface {
 	Defer() time.Time
 }
 
+type OpCore struct {
+	IdI uuid.UUID `json:"id"`
+	NameI string `json:"name"`
+	VersionI string  `json:"version"`
+	DoneI bool `json:"done"`
+	InflightI bool `json:"inflight"`
+}
+
+func (o *OpCore) Id () uuid.UUID {
+	return o.IdI
+}
+
+func (o *OpCore) Name() string {
+	return o.NameI
+}
+
+func (o *OpCore) Version() string {
+	return o.VersionI
+}
+
+func (o *OpCore) Done() bool {
+	return o.DoneI
+}
+
+func (o *OpCore) Inflight() bool {
+	return o.InflightI
+}
+
+func (o *OpCore) SetDone(d bool) {
+	o.DoneI = d
+}
+
+func (o *OpCore) SetInflight(i bool) {
+	o.InflightI = i
+}
+
 type Operation interface {
 	Id() uuid.UUID
 	Name() string
 	Version() string // TODO tighten type
+	SetDone() bool
 	Done() bool
 	Inflight() bool
 	SetInflight(bool)
 }
 
-type OpGen[T Operation]func() T
 
 type Worker interface {
 	Operation
@@ -153,14 +194,11 @@ func NewMog() Mog {
 	}
 }
 
-var opgens[string]OpGen[T] = make(map[string]OpGen[T])
-
-func RegOp[T Operation](og OpGen[T]) {
-	opgens[og(m).Name()] = og
-}
-	
-func Gen(name string) Operation {
-	return opgens[name](m)
+func GetDeq[T Operation](m Mog) <-chan  T {
+	c := make(chan T)
+	xx := <- m.Deq()
+	c <- xx.(T)
+	return c	
 }
 
 func (m mog)Rec() chan<- Operation { return m.rec }

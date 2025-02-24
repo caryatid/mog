@@ -18,10 +18,6 @@ func newFoo () foo {
 	
 }
 
-func (f foo)Name() string {
-	return "foo"
-}
-
 func fooDoOne(ctx context.Context, g group[foo], fd foo) (State[foo], foo) {
 	fd.aaa = "one"
 	fd.bbb++
@@ -34,14 +30,10 @@ func fooDoOne(ctx context.Context, g group[foo], fd foo) (State[foo], foo) {
 
 func TestOne(t *testing.T) {
 	ctx := context.Background()
-	m := NewMog()
-	m.RegOp(newFoo)
-	g := NewGroup[foo]()
-	f := m.Gen("foo").(foo)
+	g := NewGroup(newFoo)
+	f := g.OpGen()
 	g.RegisterState("foo-do-one", fooDoOne)
 	fd, _ := g.runS(ctx, f, g.GetState("foo-do-one"))
-	
 	t.Logf("fd: %+v", fd)
-	
 }
 
