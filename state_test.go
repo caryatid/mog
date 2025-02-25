@@ -2,9 +2,9 @@ package state
 
 import (
 	"context"
+	"golang.org/x/sync/errgroup"
 	"testing"
 )
-
 
 type foo struct {
 	Worker
@@ -12,28 +12,41 @@ type foo struct {
 	bbb int
 }
 
-func newFoo () foo {
-	f := foo{}
-	return f
-	
+func newFooOp(m Mog) Operation {
+	return newFoo(m)
 }
 
-func fooDoOne(ctx context.Context, g group[foo], fd foo) (State[foo], foo) {
+func newFoo(m Mog) foo {
+	f := foo{}
+	f.Worker = NewWorker("foo", m)
+	return f
+}
+
+func fooDoOne(ctx context.Context, g Group[foo], fd foo) (State[foo], foo) {
 	fd.aaa = "one"
 	fd.bbb++
 	if fd.bbb > 10 {
 		return g.GetState("done"), fd
 	}
 	return g.GetState("foo-do-one"), fd
-	
+
+}
+
+func (f foo) GetGroup() Group[foo] {
+	gr := NewGroup(newFoo)
+	gr.RegisterState("start", fooDoOne)
+	return gr
 }
 
 func TestOne(t *testing.T) {
 	ctx := context.Background()
-	g := NewGroup(newFoo)
-	f := g.OpGen()
-	g.RegisterState("foo-do-one", fooDoOne)
-	fd, _ := g.runS(ctx, f, g.GetState("foo-do-one"))
-	t.Logf("fd: %+v", fd)
+	g, ctx := errgroup.WithContext(ctx)
+	f := newFoo()
+	m := NewMog(g)
+	gr := f.GetGroup()
+	for op := range m.Deq(f.Name()) {
+		opi := op.(foo)
+		fd, _ := gr.RunS(ctx, opi)
+		t.Logf("fd: %+v", fd)
+	}
 }
-

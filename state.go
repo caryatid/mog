@@ -3,65 +3,71 @@ package state
 
 import (
 	"context"
+	"errors"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
+	"io"
 	"sync"
 	"time"
-	"errors"
-//	"go.opentelemetry.io/otel/attribute"
-//	"go.opentelemetry.io/otel/codes"
+	// "go.opentelemetry.io/otel/attribute"
+	// "go.opentelemetry.io/otel/codes"
 )
 
 var (
 	DirectEnqueue = false
-	EnumError = errors.New("invalid enum value")
+	EnumError     = errors.New("invalid enum value")
+	uuids         = make(chan uuid.UUID)
 )
 
-type OpGen[T any]func() T
+func init() {
+	go func() { // error swallowed
+		uuidGen()
+	}()
+}
 
+type OpGen[T any] func() T
 
-type group[T any] struct {
+type Group[T any] struct {
 	toState map[string]State[T]
-	pre []Proc[T]
-	post []Proc[T]
+	pre     []Proc[T]
+	post    []Proc[T]
 	OpGen[T]
 }
 
-func NewGroup[T any](og OpGen[T]) group[T] {
-	g := group[T]{}
+func NewGroup[T any](og OpGen[T]) Group[T] {
+	g := Group[T]{}
 	g.toState = make(map[string]State[T])
 	g.OpGen = og
 	return g
 }
 
-func (g group[T])GetState(name string) State[T] {
+func (g Group[T]) GetState(name string) State[T] {
 	return g.toState[name]
 }
 
-func (g group[T])Pre(ps ...Proc[T]) group[T] {
+func (g Group[T]) Pre(ps ...Proc[T]) Group[T] {
 	g.pre = append(g.pre, ps...)
 	return g
 }
 
-func (g group[T])Post(ps ...Proc[T]) group[T] {
+func (g Group[T]) Post(ps ...Proc[T]) Group[T] {
 	g.post = append(g.post, ps...)
 	return g
 }
 
-
 type Method func(context.Context) error
 
-type Step[T any] func(context.Context, group[T], T) (State[T], T)
+type Step[T any] func(context.Context, Group[T], T) (State[T], T)
 
 type State[T any] struct {
-	f Step[T]
+	f    Step[T]
 	Name string
 }
 
 type Proc[T any] func(context.Context, State[T], T) (T, error)
 
 func proc[T any](ctx context.Context, procs []Proc[T],
-		s State[T], payload T) (T, error) {
+	s State[T], payload T) (T, error) {
 	var err error
 	for _, p := range procs {
 		if payload, err = p(ctx, s, payload); err != nil {
@@ -71,15 +77,15 @@ func proc[T any](ctx context.Context, procs []Proc[T],
 	return payload, nil
 }
 
-func stateSet[T Worker](ctx context.Context, s State[T], 
-			w T) (T, error) {
+func stateSet[T Worker](ctx context.Context, s State[T],
+	w T) (T, error) {
 	w.SetState(s.Name)
 	return w, nil
 }
 
 func store(m Mog) Proc[Operation] {
-	return func(ctx context.Context, s State[Operation], 
-			o Operation) (Operation, error) {
+	return func(ctx context.Context, s State[Operation],
+		o Operation) (Operation, error) {
 		m.Rec() <- o
 		return o, nil
 	}
@@ -87,7 +93,7 @@ func store(m Mog) Proc[Operation] {
 
 func cont(m Mog) Proc[Operation] {
 	return func(ctx context.Context, s State[Operation],
-			o Operation) (Operation, error) {
+		o Operation) (Operation, error) {
 		if !o.Done() && DirectEnqueue {
 			m.Enq() <- o
 		}
@@ -95,16 +101,10 @@ func cont(m Mog) Proc[Operation] {
 	}
 }
 
-func (g group[T])runS(ctx context.Context, payload T,
-		start State[T]) (T, error) {
+func (g Group[T]) RunS(ctx context.Context, sname string,
+	payload T) (T, error) {
 	var err error
-	for state := start; state.f != nil;  {
-		for _, p := range g.pre {
-			if payload, err = p(ctx, state, payload); err != nil {
-				return payload, err
-			}
-		}
-
+	for state := g.GetState(sname); state.f != nil; {
 		if payload, err = proc(ctx, g.pre, state, payload); err != nil {
 			return payload, err
 		}
@@ -116,7 +116,7 @@ func (g group[T])runS(ctx context.Context, payload T,
 	return payload, nil
 }
 
-func (g group[T])RegisterState(name string, f Step[T]) {
+func (g Group[T]) RegisterState(name string, f Step[T]) {
 	g.toState[name] = State[T]{f: f, Name: name}
 }
 
@@ -127,108 +127,79 @@ type Retry interface {
 	Defer() time.Time
 }
 
-type OpCore struct {
-	IdI uuid.UUID `json:"id"`
-	NameI string `json:"name"`
-	VersionI string  `json:"version"`
-	DoneI bool `json:"done"`
-	InflightI bool `json:"inflight"`
+func uuidGen() error {
+	for {
+		u, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		uuids <- u
+	}
+
 }
 
-func (o *OpCore) Id () uuid.UUID {
+func NewOp(name string, m Mog) *OpI {
+	oc := new(OpI)
+	oc.IdI = <-uuids
+	oc.NameI = name
+	oc.VersionI = "0.0.0" // ? wat means
+	oc.DoneI = false
+	oc.InflightI = true // on creation is not in DB, is like a bird
+	oc.MogI = m
+	return oc
+}
+
+type OpI struct {
+	IdI       uuid.UUID `json:"id"`
+	NameI     string    `json:"name"`
+	VersionI  string    `json:"version"`
+	DoneI     bool      `json:"done"`
+	InflightI bool      `json:"inflight"`
+	MogI      Mog
+}
+
+func (w *OpI) Mog() Mog {
+	return w.MogI
+}
+
+func (o *OpI) Id() uuid.UUID {
 	return o.IdI
 }
 
-func (o *OpCore) Name() string {
+func (o *OpI) Name() string {
 	return o.NameI
 }
 
-func (o *OpCore) Version() string {
+func (o *OpI) Version() string {
 	return o.VersionI
 }
 
-func (o *OpCore) Done() bool {
+func (o *OpI) Done() bool {
 	return o.DoneI
 }
 
-func (o *OpCore) Inflight() bool {
+func (o *OpI) SetDone(d bool) {
+	o.DoneI = d
+}
+func (o *OpI) Inflight() bool {
 	return o.InflightI
 }
 
-func (o *OpCore) SetDone(d bool) {
-	o.DoneI = d
-}
-
-func (o *OpCore) SetInflight(i bool) {
+func (o *OpI) SetInflight(i bool) {
 	o.InflightI = i
 }
 
-type Operation interface {
-	Id() uuid.UUID
-	Name() string
-	Version() string // TODO tighten type
-	SetDone() bool
-	Done() bool
-	Inflight() bool
-	SetInflight(bool)
-}
-
-
-type Worker interface {
-	Operation
-	State() string // if State[T] then Worker would have to be generic
-	SetState(string)
-}
-
-type mog struct {
-	scmutex sync.Mutex
-	enq chan Operation
-	deq chan Operation
-	rec chan Operation
-	g *errgroup.Group
-	// s.g, ctx = errgroup.WithContext(ctx)
-}
-
-func NewMog() Mog {
-	return mog {
-	}
-}
-
-func GetDeq[T Operation](m Mog) <-chan  T {
-	c := make(chan T)
-	xx := <- m.Deq()
-	c <- xx.(T)
-	return c	
-}
-
-func (m mog)Rec() chan<- Operation { return m.rec }
-func (m mog)Enq() chan<- Operation { return m.enq }
-func (m mog)Deq() <-chan Operation { return m.deq }
-func (m mog)Check(context.Context, []uuid.UUID) bool { return false }
-func (m mog)Get(context.Context, uuid.UUID) (Operation, error) {
-	return nil,nil
-}
-
-type Mog interface {
-	Rec() chan<- Operation
-	Enq() chan<- Operation
-	Deq() <-chan Operation
-	Check(context.Context, []uuid.UUID) bool
+type Record interface {
+	io.Closer
+	Store(context.Context, Operation) error
+	Scan(context.Context, chan<- Operation) error
 	Get(context.Context, uuid.UUID) (Operation, error)
 }
 
-/*
-type Record[T any] interface {
+type Pipe interface {
 	io.Closer
-	Store(context.Context, Event[T]) error
-	Scan(context.Context, chan<- Event[T]) error
-	Get(context.Context, uuid.UUID) (Event[T], error)
-}
-
-type Pipe[T any] interface {
-	io.Closer
-	Enqueue(context.Context, Event[T]) error
-	Dequeue(context.Context, chan<- Event[T]) error
+	Enqueue(context.Context, Operation) error
+	Dequeue(context.Context, chan<- Operation) error
 }
 
 type Blob interface {
@@ -236,6 +207,152 @@ type Blob interface {
 	Save(context.Context, io.Reader, ...string) error
 	Load(context.Context, ...string) (io.Reader, error)
 }
+
+type Operation interface {
+	Id() uuid.UUID
+	Name() string
+	Version() string // TODO tighten type
+	SetDone(bool)
+	Done() bool
+	Inflight() bool
+	SetInflight(bool)
+	Mog() Mog
+}
+
+type Worker interface {
+	Operation
+	State() string // if State[T] then Worker would have to be generic
+	SetState(string)
+}
+
+type WorkerI struct {
+	Operation
+	StateI string `json:"state"`
+}
+
+func (w *WorkerI) SetState(name string) {
+	w.StateI = name
+}
+
+func (w *WorkerI) State() string {
+	return w.StateI
+}
+
+func NewWorker(name string, m Mog) *WorkerI {
+	w := new(WorkerI)
+	w.Operation = NewOp(name, m)
+	return w
+}
+
+type mog struct {
+	scmutex sync.Mutex
+	outs    map[string]chan Operation
+	enq     chan Operation
+	deq     chan Operation
+	rec     chan Operation
+	g       *errgroup.Group
+	p       Pipe
+	r       Record
+	b       Blob
+	// s.g, ctx = errgroup.WithContext(ctx)
+}
+
+func (m mog) Deq(name string) <-chan Operation {
+	return m.outs[name]
+}
+
+func NewMog(ctx context.Context, g *errgroup.Group, p Pipe,
+	r Record, b Blob) Mog { // ? pass in mutex
+	m := mog{}
+	m.enq = make(chan Operation)
+	m.deq = make(chan Operation)
+	m.rec = make(chan Operation)
+	m.p = p
+	m.r = r
+	m.b = b
+	m.g = g
+	m.g.Go(func() error { return rangeRun(ctx, m.enq, m.p.Enqueue) })
+	m.g.Go(func() error {
+		return tickit(ctx, time.Millisecond*5,
+			func() error {
+				return m.p.Dequeue(ctx, m.deq)
+			})
+	})
+	m.g.Go(func() error { return rangeRun(ctx, m.rec, m.r.Store) })
+	m.g.Go(func() error {
+		return tickit(ctx, time.Millisecond*10,
+			func() error {
+				// ? ingest uniqueness instead of locks
+				m.scmutex.Lock()
+				defer m.scmutex.Unlock()
+				return m.r.Scan(ctx, m.enq)
+			})
+	})
+	m.g.Go(func() error {
+		for o := range m.deq {
+			m.outs[o.Name()] <- o
+		}
+		return nil
+	})
+	return m
+}
+
+func (m mog) Rec() chan<- Operation                   { return m.rec }
+func (m mog) Enq() chan<- Operation                   { return m.enq }
+func (m mog) Check(context.Context, []uuid.UUID) bool { return false }
+func (m mog) Get(context.Context, uuid.UUID) (Operation, error) {
+	return nil, nil
+}
+
+// ? does this need be an interface (was nice for dev)
+type Mog interface {
+	Rec() chan<- Operation
+	Enq() chan<- Operation
+	Deq(string) <-chan Operation
+	// Check is likely superfluous
+	Check(context.Context, []uuid.UUID) bool
+	Get(context.Context, uuid.UUID) (Operation, error)
+}
+
+func rangeRun(ctx context.Context, ch <-chan Operation,
+	f func(ctx context.Context, w Operation) error) error {
+	for w := range ch {
+		if err := f(ctx, w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func tickuntil(ctx context.Context, td time.Duration, f func() bool) error {
+	t := time.NewTicker(td)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			if f() {
+				return nil
+			}
+		}
+	}
+}
+
+func tickit(ctx context.Context, td time.Duration, f func() error) error {
+	t := time.NewTicker(td)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			if err := f(); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+/*
 
 
 type defState[T any] struct {
@@ -325,41 +442,6 @@ func (s *defState[T]) Close() error {
 	return nil
 }
 
-func rangeRun[T any](ctx context.Context, ch <-chan Event[T], 
-		f func(ctx context.Context, w Event[T]) error) error {
-	for w := range ch {
-		if err := f(ctx, w); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func tickuntil(ctx context.Context, td time.Duration, f func () bool) error {
-	t := time.NewTicker(td)
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-t.C:
-			if f() { return nil }
-		}
-	}
-}
-
-func tickit(ctx context.Context, td time.Duration, f func () error) error {
-	t := time.NewTicker(td)
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-t.C:
-			if err := f(); err != nil {
-				return err
-			}
-		}
-	}
-}
 
 // Status enum definition
 type Status int
@@ -468,4 +550,3 @@ func (e Event[T]) otelEnd() {
 	e.span.End()
 }
 */
-
