@@ -1,5 +1,5 @@
-// Package state manages, you guessed it, state.
-package state
+// package mog mogs u
+package mog
 
 import (
 	"context"
@@ -26,62 +26,6 @@ func init() {
 	}()
 }
 
-type OpGen func() Operation
-
-type Group[T any] struct {
-	toState map[string]State[T]
-	pre     []Proc[T]
-	post    []Proc[T]
-}
-
-func NewGroup[T any]() Group[T] {
-	g := Group[T]{}
-	g.toState = make(map[string]State[T])
-	return g
-}
-
-func (g Group[T]) GetState(name string) State[T] {
-	return g.toState[name]
-}
-
-func (g Group[T]) Pre(ps ...Proc[T]) Group[T] {
-	g.pre = append(g.pre, ps...)
-	return g
-}
-
-func (g Group[T]) Post(ps ...Proc[T]) Group[T] {
-	g.post = append(g.post, ps...)
-	return g
-}
-
-type Method func(context.Context) error
-
-type Step[T any] func(context.Context, Group[T], T) (State[T], T)
-
-type State[T any] struct {
-	f    Step[T]
-	Name string
-}
-
-type Proc[T any] func(context.Context, State[T], T) (T, error)
-
-func proc[T any](ctx context.Context, procs []Proc[T],
-	s State[T], payload T) (T, error) {
-	var err error
-	for _, p := range procs {
-		if payload, err = p(ctx, s, payload); err != nil {
-			return payload, err
-		}
-	}
-	return payload, nil
-}
-
-func stateSet[T Worker](ctx context.Context, s State[T],
-	w T) (T, error) {
-	w.SetState(s.Name)
-	return w, nil
-}
-
 func store(m Mog) Proc[Operation] {
 	return func(ctx context.Context, s State[Operation],
 		o Operation) (Operation, error) {
@@ -100,24 +44,7 @@ func cont(m Mog) Proc[Operation] {
 	}
 }
 
-func (g Group[T]) RunS(ctx context.Context, sname string,
-	payload T) (T, error) {
-	var err error
-	for state := g.GetState(sname); state.f != nil; {
-		if payload, err = proc(ctx, g.pre, state, payload); err != nil {
-			return payload, err
-		}
-		state, payload = state.f(ctx, g, payload)
-		if payload, err = proc(ctx, g.post, state, payload); err != nil {
-			return payload, err
-		}
-	}
-	return payload, nil
-}
-
-func (g Group[T]) RegisterState(name string, f Step[T]) {
-	g.toState[name] = State[T]{f: f, Name: name}
-}
+type OpGen func() Operation
 
 type Retry interface {
 	Name() string
@@ -134,11 +61,10 @@ func uuidGen() error {
 		}
 		uuids <- u
 	}
-
 }
 
-func NewOp(name string, m Mog) *OpI {
-	oc := new(OpI)
+func NewOp(name string, m Mog) *opI {
+	oc := new(opI)
 	oc.IdI = <-uuids
 	oc.NameI = name
 	oc.VersionI = "0.0.0" // ? wat means
@@ -148,7 +74,7 @@ func NewOp(name string, m Mog) *OpI {
 	return oc
 }
 
-type OpI struct {
+type opI struct {
 	IdI       uuid.UUID `json:"id"`
 	NameI     string    `json:"name"`
 	VersionI  string    `json:"version"`
@@ -158,43 +84,43 @@ type OpI struct {
 	MogI      Mog
 }
 
-func (w *OpI) Mog() Mog {
+func (w *opI) Mog() Mog {
 	return w.MogI
 }
 
-func (o *OpI) Id() uuid.UUID {
+func (o *opI) Id() uuid.UUID {
 	return o.IdI
 }
 
-func (o *OpI) Name() string {
+func (o *opI) Name() string {
 	return o.NameI
 }
 
-func (o *OpI) Version() string {
+func (o *opI) Version() string {
 	return o.VersionI
 }
 
-func (o *OpI) Done() bool {
+func (o *opI) Done() bool {
 	return o.DoneI
 }
 
-func (o *OpI) SetDone(d bool) {
+func (o *opI) SetDone(d bool) {
 	o.DoneI = d
 }
 
-func (o *OpI) Inflight() bool {
+func (o *opI) Inflight() bool {
 	return o.InflightI
 }
 
-func (o *OpI) SetInflight(i bool) {
+func (o *opI) SetInflight(i bool) {
 	o.InflightI = i
 }
 
-func (o *OpI) Defer() time.Time {
+func (o *opI) Defer() time.Time {
 	return o.DeferI
 }
 
-func (o *OpI) SetDefer(t time.Time) {
+func (o *opI) SetDefer(t time.Time) {
 	o.DeferI = t
 }
 
@@ -266,7 +192,6 @@ type mog struct {
 	p       Pipe
 	r       Record
 	b       Blob
-	// s.g, ctx = errgroup.WithContext(ctx)
 }
 
 func (m mog) Deq(name string) <-chan Operation {
@@ -370,8 +295,6 @@ func tickit(ctx context.Context, td time.Duration, f func() error) error {
 }
 
 /*
-
-
 type defState[T any] struct {
 	scmutex sync.Locker
 	b   Blob
