@@ -17,27 +17,26 @@ var (
 	DirectEnqueue = false
 	EnumError     = errors.New("invalid enum value")
 	uuids         = make(chan uuid.UUID)
+	gens = make(map[string]OpGen)
 )
 
 func init() {
-	go func() { // error swallowed
+	go func() { // ! error swallowed
 		uuidGen()
 	}()
 }
 
-type OpGen[T any] func() T
+type OpGen func() Operation
 
 type Group[T any] struct {
 	toState map[string]State[T]
 	pre     []Proc[T]
 	post    []Proc[T]
-	OpGen[T]
 }
 
-func NewGroup[T any](og OpGen[T]) Group[T] {
+func NewGroup[T any]() Group[T] {
 	g := Group[T]{}
 	g.toState = make(map[string]State[T])
-	g.OpGen = og
 	return g
 }
 
@@ -155,6 +154,7 @@ type OpI struct {
 	VersionI  string    `json:"version"`
 	DoneI     bool      `json:"done"`
 	InflightI bool      `json:"inflight"`
+	DeferI    time.Time `json:"defer"`
 	MogI      Mog
 }
 
@@ -181,12 +181,21 @@ func (o *OpI) Done() bool {
 func (o *OpI) SetDone(d bool) {
 	o.DoneI = d
 }
+
 func (o *OpI) Inflight() bool {
 	return o.InflightI
 }
 
 func (o *OpI) SetInflight(i bool) {
 	o.InflightI = i
+}
+
+func (o *OpI) Defer() time.Time {
+	return o.DeferI
+}
+
+func (o *OpI) SetDefer(t time.Time) {
+	o.DeferI = t
 }
 
 type Record interface {
@@ -216,6 +225,8 @@ type Operation interface {
 	Done() bool
 	Inflight() bool
 	SetInflight(bool)
+	Defer() time.Time
+	SetDefer(time.Time)
 	Mog() Mog
 }
 
@@ -247,6 +258,7 @@ func NewWorker(name string, m Mog) *WorkerI {
 type mog struct {
 	scmutex sync.Mutex
 	outs    map[string]chan Operation
+	gens    map[string]OpGen
 	enq     chan Operation
 	deq     chan Operation
 	rec     chan Operation
@@ -264,6 +276,7 @@ func (m mog) Deq(name string) <-chan Operation {
 func NewMog(ctx context.Context, g *errgroup.Group, p Pipe,
 	r Record, b Blob) Mog { // ? pass in mutex
 	m := mog{}
+	m.outs = make(map[string]chan Operation)
 	m.enq = make(chan Operation)
 	m.deq = make(chan Operation)
 	m.rec = make(chan Operation)
@@ -295,6 +308,10 @@ func NewMog(ctx context.Context, g *errgroup.Group, p Pipe,
 		return nil
 	})
 	return m
+}
+
+func RegisterOp(f OpGen) {
+	gens[f().Name()] = f
 }
 
 func (m mog) Rec() chan<- Operation                   { return m.rec }

@@ -33,7 +33,7 @@ func fooDoOne(ctx context.Context, g Group[foo], fd foo) (State[foo], foo) {
 }
 
 func (f foo) GetGroup() Group[foo] {
-	gr := NewGroup(newFoo)
+	gr := NewGroup()
 	gr.RegisterState("start", fooDoOne)
 	return gr
 }
